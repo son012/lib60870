@@ -147,9 +147,14 @@ HandleReceivedData (void* parameter, uint8_t* msg, bool isBroadcast, int userDat
 
     CS101_ASDU asdu = CS101_ASDU_createFromBuffer(&(self->alParameters), msg + userDataStart, userDataLength);
 
-    handleASDU(self, asdu);
+    if (asdu) {
+        handleASDU(self, asdu);
 
-    CS101_ASDU_destroy(asdu);
+        CS101_ASDU_destroy(asdu);
+    }
+    else {
+        DEBUG_PRINT("CS101 slave: Failed to parse ASDU\n");
+    }
 
     return true;
 }
@@ -385,6 +390,10 @@ CS101_Slave_destroy(CS101_Slave self)
 
         CS101_Queue_dispose(&(self->userDataClass1Queue));
         CS101_Queue_dispose(&(self->userDataClass2Queue));
+
+        if (self->plugins) {
+            LinkedList_destroyStatic(self->plugins);
+        }
 
         GLOBAL_FREEMEM(self);
     }

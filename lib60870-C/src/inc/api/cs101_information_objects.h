@@ -1789,7 +1789,7 @@ TestCommandWithCP56Time2a_create(TestCommandWithCP56Time2a self, uint16_t tsc, C
 void
 TestCommandWithCP56Time2a_destroy(TestCommandWithCP56Time2a self);
 
-uint64_t
+uint16_t
 TestCommandWithCP56Time2a_getCounter(TestCommandWithCP56Time2a self);
 
 CP56Time2a
@@ -2167,6 +2167,28 @@ FileDirectory_getCreationTime(FileDirectory self);
 
 void
 FileDirectory_destroy(FileDirectory self);
+
+/*************************************************
+ * QueryLog: InformationObject
+ *************************************************/
+
+typedef struct sQueryLog* QueryLog;
+
+QueryLog
+QueryLog_create(QueryLog self, int ioa, uint16_t nof, CP56Time2a rangeStartTime, CP56Time2a rangeStopTime);
+
+uint16_t
+QueryLog_getNOF(QueryLog self);
+
+CP56Time2a
+QueryLog_getRangeStartTime(QueryLog self);
+
+
+CP56Time2a
+QueryLog_getRangeStopTime(QueryLog self);
+
+void
+QueryLog_destroy(QueryLog self);
 
 /**
  * @}

@@ -797,7 +797,7 @@ CS104_IPAddress_setFromString(CS104_IPAddress self, const char* ipAddrStr)
         int i;
 
         for (i = 0; i < 4; i++) {
-            self->address[i] = strtoul(ipAddrStr, NULL, 10);
+            self->address[i] = (uint8_t) strtoul(ipAddrStr, NULL, 10);
 
             ipAddrStr = strchr(ipAddrStr, '.');
 
@@ -1092,11 +1092,11 @@ struct sMasterConnection {
     unsigned int isRunning:1;
     unsigned int timeoutT2Triggered:1;
     unsigned int outstandingTestFRConMessages:3;
-    unsigned int maxSentASDUs:16; /* k-parameter */
-    int oldestSentASDU:16; /* oldest sent ASDU in k-buffer */
-    int newestSentASDU:16; /* newest sent ASDU in k-buffer */
-    unsigned int sendCount:16;     /* sent messages - sequence counter */
-    unsigned int receiveCount:16;  /* received messages - sequence counter */
+    uint16_t maxSentASDUs; /* k-parameter */
+    int16_t  oldestSentASDU; /* oldest sent ASDU in k-buffer */
+    int16_t  newestSentASDU; /* newest sent ASDU in k-buffer */
+    uint16_t sendCount;     /* sent messages - sequence counter */
+    uint16_t receiveCount;  /* received messages - sequence counter */
 
     int unconfirmedReceivedIMessages; /* number of unconfirmed messages received */
 
@@ -1918,7 +1918,7 @@ handleASDU(MasterConnection self, CS101_ASDU asdu)
 
                         CS101_ASDU_setCOT(asdu, CS101_COT_ACTIVATION_CON);
 
-                        CS104_Slave_enqueueASDU(slave, asdu);
+                        sendASDUInternal(self, asdu);
                     }
                     else {
                         CS101_ASDU_setCOT(asdu, CS101_COT_ACTIVATION_CON);
@@ -2203,7 +2203,7 @@ handleMessage(MasterConnection self, uint8_t* buffer, int msgSize)
             return false;
         }
 
-        if ((buffer[2] & 1) == 0) {
+        if ((buffer[2] & 1) == 0) { /* I message */
 
             if (msgSize < 7) {
                 DEBUG_PRINT("CS104 SLAVE: Received I msg too small!");
@@ -2252,9 +2252,10 @@ handleMessage(MasterConnection self, uint8_t* buffer, int msgSize)
                     return false;
                 }
             }
-            else
-                DEBUG_PRINT("CS104 SLAVE: Connection not activated. Skip I message");
-
+            else {
+                DEBUG_PRINT("CS104 SLAVE: Received I message while connection not activate -> close connection");
+                return false;
+            }
         }
 
         /* Check for TESTFR_ACT message */
@@ -2304,6 +2305,12 @@ handleMessage(MasterConnection self, uint8_t* buffer, int msgSize)
         }
 
         else if (buffer [2] == 0x01) { /* S-message */
+
+            if (self->isActive == false) {
+                DEBUG_PRINT("CS104 SLAVE: Received S message while connection not activate -> close connection");
+                return false;
+            }
+
             int seqNo = (buffer[4] + buffer[5] * 0x100) / 2;
 
             DEBUG_PRINT("CS104 SLAVE: Rcvd S(%i) (own sendcounter = %i)\n", seqNo, self->sendCount);
@@ -2577,6 +2584,31 @@ CS104_Slave_removeConnection(CS104_Slave self, MasterConnection connection)
 #endif
 }
 
+static void
+CS104_Slave_closeAllConnections(CS104_Slave self) 
+{
+#if (CONFIG_USE_SEMAPHORES)
+    Semaphore_wait(self->openConnectionsLock);
+#endif
+
+    int i;
+
+    for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
+        if (self->masterConnections[i]) {
+            if (self->masterConnections[i]->isUsed) {
+                self->masterConnections[i]->isUsed = false;
+                MasterConnection_deinit(self->masterConnections[i]);
+            }
+        }
+    }
+
+    self->openConnections = 0;
+
+#if (CONFIG_USE_SEMAPHORES)
+    Semaphore_post(self->openConnectionsLock);
+#endif
+}
+
 static void*
 connectionHandlingThread(void* parameter)
 {
@@ -2651,8 +2683,6 @@ connectionHandlingThread(void* parameter)
     if (self->slave->connectionEventHandler) {
        self->slave->connectionEventHandler(self->slave->connectionEventHandlerParameter, &(self->iMasterConnection), CS104_CON_EVENT_CONNECTION_CLOSED);
     }
-
-    DEBUG_PRINT("CS104 SLAVE: Connection closed\n");
 
     self->isRunning = false;
 
@@ -2729,7 +2759,7 @@ _IMasterConnection_getPeerAddress(IMasterConnection self, char* addrBuf, int add
     if (addrStr == NULL)
         return 0;
 
-    int len = strlen(buf);
+    int len = (int) strlen(buf);
 
     if (len < addrBufSize) {
         strcpy(addrBuf, buf);
@@ -3048,29 +3078,29 @@ handleClientConnections(CS104_Slave self)
 static char*
 getPeerAddress(Socket socket, char* ipAddress)
 {
-    char* ipAddrStr;
+    char* ipAddrStr = NULL;
 
-    Socket_getPeerAddressStatic(socket, ipAddress);
+    if (Socket_getPeerAddressStatic(socket, ipAddress)) {
+        /* remove TCP port part */
+        if (ipAddress[0] == '[') {
+            /* IPV6 address */
+            ipAddrStr = ipAddress + 1;
 
-    /* remove TCP port part */
-    if (ipAddress[0] == '[') {
-        /* IPV6 address */
-        ipAddrStr = ipAddress + 1;
+            char* separator = strchr(ipAddrStr, ']');
 
-        char* separator = strchr(ipAddrStr, ']');
+            if (separator != NULL)
+                *separator = 0;
 
-        if (separator != NULL)
-            *separator = 0;
+        }
+        else {
+            /* IPV4 address */
+            ipAddrStr = ipAddress;
 
-    }
-    else {
-        /* IPV4 address */
-        ipAddrStr = ipAddress;
+            char* separator = strchr(ipAddrStr, ':');
 
-        char* separator = strchr(ipAddrStr, ':');
-
-        if (separator != NULL)
-            *separator = 0;
+            if (separator != NULL)
+                *separator = 0;
+        }
     }
 
     return ipAddrStr;
@@ -3582,9 +3612,11 @@ CS104_Slave_stopThreadless(CS104_Slave self)
     self->isRunning = false;
 
     if (self->serverSocket) {
-        Socket_destroy((Socket) self->serverSocket);
+        ServerSocket_destroy(self->serverSocket);
         self->serverSocket = NULL;
     }
+
+    CS104_Slave_closeAllConnections(self);
 }
 
 void
@@ -3629,85 +3661,87 @@ CS104_Slave_stop(CS104_Slave self)
 void
 CS104_Slave_destroy(CS104_Slave self)
 {
+    if (self) {
 #if (CONFIG_USE_THREADS == 1)
-    if (self->isRunning)
-        CS104_Slave_stop(self);
+        if (self->isRunning)
+            CS104_Slave_stop(self);
 #endif
 
 #if (CONFIG_CS104_SUPPORT_SERVER_MODE_SINGLE_REDUNDANCY_GROUP == 1)
-    if (self->serverMode == CS104_MODE_SINGLE_REDUNDANCY_GROUP) {
-    	if (self->asduQueue)
-    		MessageQueue_releaseAllQueuedASDUs(self->asduQueue);
-    }
-#endif
-
-    if (self->localAddress != NULL)
-        GLOBAL_FREEMEM(self->localAddress);
-
-    /*
-     * Stop all connections
-     * */
-#if (CONFIG_USE_SEMAPHORES == 1)
-    Semaphore_wait(self->openConnectionsLock);
-#endif
-
-    {
-        int i;
-
-        for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
-            if (self->masterConnections[i] != NULL && self->masterConnections[i]->isUsed)
-                MasterConnection_close(self->masterConnections[i]);
+        if (self->serverMode == CS104_MODE_SINGLE_REDUNDANCY_GROUP) {
+            if (self->asduQueue)
+                MessageQueue_releaseAllQueuedASDUs(self->asduQueue);
         }
-    }
+#endif
+
+        if (self->localAddress != NULL)
+            GLOBAL_FREEMEM(self->localAddress);
+
+        /*
+         * Stop all connections
+         * */
+#if (CONFIG_USE_SEMAPHORES == 1)
+        Semaphore_wait(self->openConnectionsLock);
+#endif
+
+        {
+            int i;
+
+            for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
+                if (self->masterConnections[i] != NULL && self->masterConnections[i]->isUsed)
+                    MasterConnection_close(self->masterConnections[i]);
+            }
+        }
 
 #if (CONFIG_USE_SEMAPHORES == 1)
-    Semaphore_post(self->openConnectionsLock);
+        Semaphore_post(self->openConnectionsLock);
 #endif
 
 #if (CONFIG_USE_THREADS == 1)
-    if (self->isThreadlessMode == false) {
-        /* Wait until all connections are closed */
-        while (CS104_Slave_getOpenConnections(self) > 0)
-            Thread_sleep(10);
-    }
+        if (self->isThreadlessMode == false) {
+            /* Wait until all connections are closed */
+            while (CS104_Slave_getOpenConnections(self) > 0)
+                Thread_sleep(10);
+        }
 #endif
 
 #if (CONFIG_USE_SEMAPHORES == 1)
-    Semaphore_destroy(self->openConnectionsLock);
+        Semaphore_destroy(self->openConnectionsLock);
 #endif
 
 #if (CONFIG_CS104_SUPPORT_SERVER_MODE_SINGLE_REDUNDANCY_GROUP == 1)
-    if (self->serverMode == CS104_MODE_SINGLE_REDUNDANCY_GROUP) {
-        MessageQueue_destroy(self->asduQueue);
-        HighPriorityASDUQueue_destroy(self->connectionAsduQueue);
-    }
+        if (self->serverMode == CS104_MODE_SINGLE_REDUNDANCY_GROUP) {
+            MessageQueue_destroy(self->asduQueue);
+            HighPriorityASDUQueue_destroy(self->connectionAsduQueue);
+        }
 #endif /* (CONFIG_CS104_SUPPORT_SERVER_MODE_SINGLE_REDUNDANCY_GROUP == 1) */
 
 #if (CONFIG_CS104_SUPPORT_SERVER_MODE_MULTIPLE_REDUNDANCY_GROUPS == 1)
 
-    if (self->serverMode == CS104_MODE_MULTIPLE_REDUNDANCY_GROUPS) {
+        if (self->serverMode == CS104_MODE_MULTIPLE_REDUNDANCY_GROUPS) {
 
-        if (self->redundancyGroups)
-            LinkedList_destroyDeep(self->redundancyGroups, (LinkedListValueDeleteFunction) CS104_RedundancyGroup_destroy);
-    }
+            if (self->redundancyGroups)
+                LinkedList_destroyDeep(self->redundancyGroups, (LinkedListValueDeleteFunction) CS104_RedundancyGroup_destroy);
+        }
 
 #endif /* (CONFIG_CS104_SUPPORT_SERVER_MODE_MULTIPLE_REDUNDANCY_GROUPS == 1) */
 
-    {
-        int i;
+        {
+            int i;
 
-        for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
+            for (i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++) {
 
-            if (self->masterConnections[i]) {
-                MasterConnection_destroy(self->masterConnections[i]);
-                self->masterConnections[i] = NULL;
+                if (self->masterConnections[i]) {
+                    MasterConnection_destroy(self->masterConnections[i]);
+                    self->masterConnections[i] = NULL;
+                }
             }
         }
-    }
 
-    if (self->plugins) {
-        LinkedList_destroyStatic(self->plugins);
-    }
+        if (self->plugins) {
+            LinkedList_destroyStatic(self->plugins);
+        }
 
-    GLOBAL_FREEMEM(self);
+        GLOBAL_FREEMEM(self);
+    }
 }
